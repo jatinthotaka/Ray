@@ -86,12 +86,14 @@ class Writer():
                 #print(type(self.temp_df))
                 #print(self.temp_df)
                 assert isinstance(self.temp_df, pd.DataFrame), "Dataframe not found: writer"
+                
                 self.temp_df.to_feather('output.ftr')
-                ray.get(reader_tracker.edit.remote(0,1))
+                
                 ray.get(dataqueue.del_sf.remote())  
                 result_list.append.remote(['Writer' , sum(pd.util.hash_pandas_object(self.temp_df)), self.temp_df.shape[0], pd.Timestamp.now(), 'feather']) 
                 count += 1
                 print('W:', count)
+                ray.get(reader_tracker.edit.remote(0,1))
                             
             if self.temp_df.shape[0] == self.max_count:
                 break
@@ -112,9 +114,10 @@ class Reader():
 
             #print(ray.get(tracker.get.remote()))
             if all(ray.get(tracker.get.remote())) and os.path.exists('output.ftr') and ray.get(writer_tracker.get.remote())[0]:
-                
-                data.edit.remote(0, pd.read_feather('output.ftr'))
-                
+                try:
+                    data.edit.remote(0, pd.read_feather('output.ftr'))
+                except:
+                    continue
                 result_list.append.remote(['Reader', sum(pd.util.hash_pandas_object(ray.get(data.get.remote())[0])), ray.get(data.get.remote())[0].shape[0], pd.Timestamp.now(), 'feather'])               
                 print('R',count)
                 count+=1
@@ -135,24 +138,21 @@ class Consumer():
         self.max_count = sub_df_count
         print(f'Consumer{self.id} created')
         
-    def caller(self,tracker, result_list):
+    def caller(self,tracker, result_list, data):
         print(f'Consumer {self.id} called')
         while True:
+            #print('consumer tracker',ray.get(tracker.get.remote()))            
             #print('consumer tracker',ray.get(tracker.get.remote()))
-            time.sleep(1)
-            if os.path.exists(self.fn):
-                #print('consumer tracker',ray.get(tracker.get.remote()))
-                assert isinstance(ray.get(tracker.get_value.remote(self.id)),int), "Consumer not receiving correct data format"
-                if ray.get(tracker.get_value.remote(self.id)) == 0:
-                    df = pd.read_feather(self.fn)
-                    #print('Consumer',self.id,df.shape[0],sum(pd.util.hash_pandas_object(df)))
-                    result_list.append.remote([f'Consumer{self.id}' , sum(pd.util.hash_pandas_object(df)), df.shape[0], pd.Timestamp.now(), 'feather'])
-                    tracker.edit.remote(self.id,1)
-                    print(f'Consumer{self.id} {df.shape[0]}')
-                    if df.shape[0] == self.max_count * 2000:
-                        break                    
-            else:
-                time.sleep(2)
+            assert isinstance(ray.get(tracker.get_value.remote(self.id)),int), "Consumer not receiving correct data format"
+            if ray.get(tracker.get_value.remote(self.id)) == 0:
+                df = ray.get(data.get.remote())[0]
+                #print('Consumer',self.id,df.shape[0],sum(pd.util.hash_pandas_object(df)))
+                result_list.append.remote([f'Consumer{self.id}' , sum(pd.util.hash_pandas_object(df)), df.shape[0], pd.Timestamp.now(), 'feather'])
+                tracker.edit.remote(self.id,1)
+                print('.',end = "")
+                if df.shape[0] == self.max_count * 2000:
+                    break                    
+           
             
             
     
@@ -164,7 +164,7 @@ class Consumer():
 
 def main():        
     #Parameters
-    sub_df_countq, row_countq, num_col_countq, cat_col_countq, consumer_count = 100, 2000, 7, 3, 10
+    sub_df_countq, row_countq, num_col_countq, cat_col_countq, consumer_count = 200, 2000, 7, 3, 50
     
     #Calling ray functions
     if os.path.exists('output.ftr'):
@@ -188,7 +188,7 @@ def main():
     
     consumers = [Consumer.remote(i, sub_df_countq) for i in range(consumer_count)]
     #print(ray.get([c.check.remote() for c in consumers]))
-    actors = [producer.caller.remote(list_values,result_list), writer.caller.remote(list_values,result_list,write_read_chk),reader.caller.remote(consumer_count, track_list, data_file, result_list,write_read_chk)] + [c.caller.remote(track_list, result_list) for c in consumers]
+    actors = [producer.caller.remote(list_values,result_list), writer.caller.remote(list_values,result_list,write_read_chk),reader.caller.remote(consumer_count, track_list, data_file, result_list,write_read_chk)] + [c.caller.remote(track_list, result_list,data_file) for c in consumers]
     print(ray.get(actors))          
     print("Final list", ray.get(result_list.get.remote()))
     results = list(ray.get(result_list.get.remote()))
